@@ -1,6 +1,6 @@
 import * as React from "react";
 const { useState, useCallback } = React;
-import { setIcon } from "obsidian";
+import { setIcon, Menu, Notice } from "obsidian";
 import type { ChatMessage, MessageContent } from "../types/chat";
 import type { AcpClient } from "../acp/acp-client";
 import type AgentClientPlugin from "../plugin";
@@ -8,6 +8,7 @@ import { MarkdownRenderer } from "./shared/MarkdownRenderer";
 import { TerminalBlock } from "./TerminalBlock";
 import { ToolCallBlock } from "./ToolCallBlock";
 import { LucideIcon } from "./shared/IconButton";
+import { CanvasWriter } from "../services/canvas-writer";
 
 // ---------------------------------------------------------------------------
 // TextWithMentions (internal helper)
@@ -307,6 +308,54 @@ function extractTextContent(contents: MessageContent[]): string {
 		.join("\n");
 }
 
+async function saveTextToCanvas(
+	plugin: AgentClientPlugin,
+	text: string,
+	openAfter: boolean,
+): Promise<void> {
+	const trimmed = text.trim();
+	if (!trimmed) {
+		new Notice("Nothing to save");
+		return;
+	}
+	try {
+		const writer = new CanvasWriter(plugin);
+		const result = await writer.saveCards([{ text: trimmed }]);
+		if (result && openAfter) {
+			await writer.openCanvas(result.file);
+		}
+	} catch (err) {
+		console.error("[AgentClient] Canvas save failed:", err);
+		new Notice("Failed to save canvas card — see console");
+	}
+}
+
+function SaveToCanvasButton({
+	contents,
+	plugin,
+}: {
+	contents: MessageContent[];
+	plugin: AgentClientPlugin;
+}) {
+	const handleClick = useCallback(() => {
+		const text = extractTextContent(contents);
+		void saveTextToCanvas(plugin, text, false);
+	}, [contents, plugin]);
+
+	const iconRef = useCallback((el: HTMLButtonElement | null) => {
+		if (el) setIcon(el, "square-plus");
+	}, []);
+
+	return (
+		<button
+			className="clickable-icon agent-client-message-action-button"
+			onClick={handleClick}
+			aria-label="Save as Canvas card"
+			ref={iconRef}
+		/>
+	);
+}
+
 /**
  * Copy button that shows a check icon briefly after copying.
  * Uses callback ref for Obsidian's setIcon DOM manipulation.
@@ -392,9 +441,54 @@ export const MessageBubble = React.memo(function MessageBubble({
 }: MessageBubbleProps) {
 	const groups = groupContent(message.content);
 
+	const handleContextMenu = useCallback(
+		(e: React.MouseEvent<HTMLDivElement>) => {
+			if (message.role !== "assistant") return;
+			const selectedText = window.getSelection()?.toString() ?? "";
+			const hasSelection = selectedText.trim().length > 0;
+			const fallbackText = extractTextContent(message.content);
+			if (!hasSelection && !fallbackText.trim()) return;
+
+			e.preventDefault();
+			const menu = new Menu();
+			if (hasSelection) {
+				menu.addItem((item) =>
+					item
+						.setTitle("Save selection as Canvas card")
+						.setIcon("square-plus")
+						.onClick(() => {
+							void saveTextToCanvas(plugin, selectedText, false);
+						}),
+				);
+			}
+			menu.addItem((item) =>
+				item
+					.setTitle("Save entire response as Canvas card")
+					.setIcon("file-plus-2")
+					.onClick(() => {
+						void saveTextToCanvas(plugin, fallbackText, false);
+					}),
+			);
+			menu.addItem((item) =>
+				item
+					.setTitle("Save and open canvas")
+					.setIcon("external-link")
+					.onClick(() => {
+						const text = hasSelection ? selectedText : fallbackText;
+						void saveTextToCanvas(plugin, text, true);
+					}),
+			);
+			menu.showAtMouseEvent(e.nativeEvent);
+		},
+		[message.role, message.content, plugin],
+	);
+
 	return (
 		<div
 			className={`agent-client-message-renderer ${message.role === "user" ? "agent-client-message-user" : "agent-client-message-assistant"}`}
+			onContextMenu={
+				message.role === "assistant" ? handleContextMenu : undefined
+			}
 		>
 			{groups.map((group, idx) => {
 				if (group.type === "attachments") {
@@ -440,6 +534,12 @@ export const MessageBubble = React.memo(function MessageBubble({
 			) && (
 				<div className="agent-client-message-actions">
 					<CopyButton contents={message.content} />
+					{message.role === "assistant" && (
+						<SaveToCanvasButton
+							contents={message.content}
+							plugin={plugin}
+						/>
+					)}
 				</div>
 			)}
 		</div>
